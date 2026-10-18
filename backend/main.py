@@ -13,7 +13,21 @@ import asyncio
 import tempfile
 from typing import Optional, List, Dict, Any
 
+import difflib
 import httpx
+
+def generate_unified_diff(original: str, modified: str, filename: str = "target_module.py") -> str:
+    orig_lines = original.splitlines(keepends=True)
+    mod_lines = modified.splitlines(keepends=True)
+    diff = difflib.unified_diff(
+        orig_lines,
+        mod_lines,
+        fromfile=f"a/{filename}",
+        tofile=f"b/{filename}",
+        n=3
+    )
+    return "".join(diff)
+
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
@@ -87,6 +101,9 @@ class PreflightResult(BaseModel):
     preflight_md: str
     devcontainer_json: str
     terminal_commands: List[str]
+    unified_diff: Optional[str] = ""
+    root_cause_explanation: Optional[str] = ""
+    remediation_explanation: Optional[str] = ""
 
 
 class ExecuteRequest(BaseModel):
@@ -159,74 +176,16 @@ def parse_github_issue_url(url: str) -> tuple[str, int]:
     return match.group(1), int(match.group(2))
 
 
-async def fetch_issue_data_scrape(client: httpx.AsyncClient, repo: str, issue_num: int) -> dict:
-    """Fallback scraper using public GitHub web page when REST API rate limit is exceeded."""
-    url = f"https://github.com/{repo}/issues/{issue_num}"
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
-    }
-    try:
-        r = await client.get(url, headers=headers, follow_redirects=True)
-        if r.status_code == 200:
-            html = r.text
-            title_match = re.search(r"<title>(.*?) · Issue #(\d+) · (.*?) · GitHub</title>", html)
-            title = title_match.group(1).strip() if title_match else f"Issue #{issue_num}"
-
-            desc_match = re.search(r'<meta property="og:description" content="([^"]*)"', html)
-            desc = desc_match.group(1).strip() if desc_match else ""
-
-            author_match = re.search(r'class="author[^"]*"[^>]*>([^<]+)</a>', html) or re.search(r'data-hovercard-type="user"[^>]*>([^<]+)</a>', html)
-            author = author_match.group(1).strip() if author_match else "contributor"
-
-            labels = []
-            label_matches = re.findall(r'class="IssueLabel[^"]*"[^>]*data-name="([^"]+)"', html)
-            if label_matches:
-                labels = [{"name": l} for l in label_matches[:4]]
-
-            return {
-                "title": title,
-                "body": desc,
-                "user": {"login": author},
-                "labels": labels,
-                "comments": 0
-            }
-    except Exception as e:
-        print(f"fetch_issue_data_scrape error: {e}")
-    
-    return {
-        "title": f"Issue #{issue_num} on {repo}",
-        "body": f"Automated sandbox triage and reproduction for {repo}#{issue_num}.",
-        "user": {"login": "contributor"},
-        "labels": [],
-        "comments": 0
-    }
-
-
 async def fetch_issue_data(client: httpx.AsyncClient, repo: str, issue_num: int, token: Optional[str] = None) -> dict:
     headers = get_github_headers(token)
     url = f"https://api.github.com/repos/{repo}/issues/{issue_num}"
-    try:
-        r = await client.get(url, headers=headers)
-        if r.status_code == 404:
-            # Check public HTML before 404 error
-            scraped = await fetch_issue_data_scrape(client, repo, issue_num)
-            if scraped.get("title") and scraped["title"] != f"Issue #{issue_num}":
-                return scraped
-            raise HTTPException(status_code=404, detail=f"GitHub Issue {repo}#{issue_num} not found or repository is private.")
-        if r.status_code in (403, 429):
-            # GitHub rate limit hit — seamlessly fallback to public HTML scraping!
-            print(f"[Rate-Limit] GitHub API rate limit hit on {repo}#{issue_num}. Seamlessly falling back to public HTML scraper.")
-            return await fetch_issue_data_scrape(client, repo, issue_num)
-        if r.status_code == 200:
-            return r.json()
-    except HTTPException:
-        raise
-    except Exception as e:
-        print(f"[Warning] fetch_issue_data exception: {e}. Falling back to HTML scraper.")
-        return await fetch_issue_data_scrape(client, repo, issue_num)
-
-    return await fetch_issue_data_scrape(client, repo, issue_num)
+    r = await client.get(url, headers=headers)
+    if r.status_code == 404:
+        raise HTTPException(status_code=404, detail=f"GitHub Issue {repo}#{issue_num} not found or repository is private.")
+    if r.status_code == 403:
+        raise HTTPException(status_code=403, detail="GitHub API rate limit exceeded. Please provide a personal GitHub token.")
+    r.raise_for_status()
+    return r.json()
 
 
 async def fetch_comments(client: httpx.AsyncClient, repo: str, issue_num: int, token: Optional[str] = None) -> list[dict]:
@@ -258,13 +217,10 @@ async def fetch_repo_tree(client: httpx.AsyncClient, repo: str, token: Optional[
                         ".png", ".jpg", ".jpeg", ".gif", ".svg", ".ico", ".woff", ".woff2", ".pdf", ".zip"
                     ])
                 ]
-                if files:
-                    return files[:400]
+                return files[:400]
         except Exception:
             continue
-    # Default fallback tree files
-    repo_name = repo.split('/')[-1].replace('-', '_')
-    return [f"src/{repo_name}.py", f"{repo_name}/core.py", f"{repo_name}/client.py", f"{repo_name}/__init__.py", "tests/test_core.py"]
+    return []
 
 
 async def fetch_snippet(client: httpx.AsyncClient, repo: str, file_path: str) -> Optional[str]:
@@ -291,10 +247,18 @@ def generate_heuristic_fallback(
     target_files: List[str]
 ) -> dict:
     repo_clean = repo.replace("/", "-").lower()
-    primary_file = target_files[0] if target_files else "src/core.py"
+    is_js_repo = any(f.endswith(ext) for f in target_files for ext in [".js", ".mjs", ".ts", ".tsx", ".jsx"]) or any(
+        kw in repo.lower() for kw in ["trezor", "react", "vue", "next", "express", "node", "angular", "svelte"]
+    )
+    primary_file = target_files[0] if target_files else ("src/core.js" if is_js_repo else "src/core.py")
     
+    root_cause = "Input payload triggered an unhandled edge-case in unpatched code."
+    remediation = "Introduced defensive safeguards and default value handling."
+
     # Specific realistic templates for the top issues
     if "requests" in repo.lower():
+        root_cause = "The generator yielded empty byte chunks (b'') or None in chunked uploads. Unpatched code raised an unhandled ValueError instead of respecting RFC 7230 stream boundary conventions."
+        remediation = "Safely skip empty chunks (b'') or None with 'continue' during stream assembly, preserving streaming throughput without crashing."
         source_code = '''"""
 requests.adapters - Streaming chunked transfer processor
 Responsible for preparing and sending chunked body streams.
@@ -380,6 +344,8 @@ def test_repro_generator_boundary():
     assert result == b"header_data", "Boundary empty chunk must not cause failure"
 '''
     elif "flask" in repo.lower():
+        root_cause = "Subdomain routing parameters prefixed with 'subdomain_' were inadvertently dropped before forwarding arguments to url_value_preprocessor."
+        remediation = "Preserve full view_args including subdomain parameters so blueprint url_value_preprocessors receive complete routing context."
         source_code = '''"""
 flask.blueprints - URL Value Preprocessor Handler
 """
@@ -458,6 +424,8 @@ def test_repro_subdomain_params_in_preprocessor():
     assert received_params["subdomain"] == "tenant1"
 '''
     elif "httpx" in repo.lower():
+        root_cause = "On same-origin redirects across different localhost ports, the redirect engine classified the request as cross-origin and prematurely stripped Authorization headers."
+        remediation = "Verify host identity and retain Bearer authentication headers when redirecting across same-origin localhost ports."
         source_code = '''"""
 httpx._client - Redirect and Authorization Header Handler
 """
@@ -523,8 +491,81 @@ def test_repro_same_origin_auth_preserved():
     assert result_headers["Authorization"] == "Bearer preflight-secret-token"
 '''
     else:
-        # Generic robust issue reproduction template
-        source_code = f'''"""
+        if is_js_repo:
+            root_cause = "The payload object is either null/undefined or has 'data: null'. The unpatched code strictly threw an unhandled Error: 'Payload missing critical data attribute' instead of applying safe defaults."
+            remediation = "Apply defensive defaulting: if payload is missing or data is null/undefined, safely fallback to an empty array ([]) and return status 'ok' with 0 items."
+            source_code = f'''/**
+ * Target Component: {primary_file}
+ * Repository: {repo}#{issue_num}
+ */
+
+export class ServiceHandler {{
+  constructor() {{
+    this.state = "initialized";
+  }}
+
+  processData(payload) {{
+    /**
+     * Handles incoming payload stream.
+     * BUG ({repo}#{issue_num}): {issue_title}
+     */
+    // UNPATCHED BUGGY CODE:
+    if (!payload || payload.data === null || payload.data === undefined) {{
+      throw new Error("Payload missing critical data attribute");
+    }}
+    return {{ status: "ok", items: payload.data.length }};
+  }}
+}}
+'''
+
+            patch_code = f'''/**
+ * Target Component: {primary_file}
+ * Repository: {repo}#{issue_num}
+ */
+
+export class ServiceHandler {{
+  constructor() {{
+    this.state = "initialized";
+  }}
+
+  processData(payload) {{
+    /**
+     * REMEDIATED: Gracefully handles empty or missing data fields with safe defaults.
+     */
+    // REMEDIATED FIX:
+    if (!payload) return {{ status: "ok", items: 0 }};
+    const data = payload.data || [];
+    return {{ status: "ok", items: data.length }};
+  }}
+}}
+'''
+
+            test_repro = f'''/**
+ * PreFlight Reproduction Test: {repo}#{issue_num}
+ * Failing Unit Test (RED Phase - TDD Workflow)
+ * Issue: {issue_title}
+ */
+import test from "node:test";
+import assert from "node:assert";
+import {{ ServiceHandler }} from "./target_module.js";
+
+test("test_repro_graceful_handling_empty_payload", () => {{
+  /**
+   * Validates that empty payloads do not crash the service handler.
+   * Expected: Returns status 'ok' with 0 items.
+   * Observed (Unpatched): Throws Error: Payload missing critical data attribute
+   */
+  const handler = new ServiceHandler();
+  const result = handler.processData({{ data: null }});
+  assert.strictEqual(result.status, "ok");
+  assert.strictEqual(result.items, 0);
+}});
+'''
+        else:
+            root_cause = "The input data payload or stream is either empty or contains null attributes. The unpatched function strictly requires non-null data and raises an unhandled ValueError."
+            remediation = "Introduce defensive fallback logic: treat missing data as an empty collection and return a safe default response dictionary without crashing."
+            # Generic robust Python issue reproduction template
+            source_code = f'''"""
 Target Component: {primary_file}
 Repository: {repo}#{issue_num}
 """
@@ -545,7 +586,7 @@ class ServiceHandler:
         return {{"status": "ok", "items": len(payload["data"])}}
 '''
 
-        patch_code = f'''"""
+            patch_code = f'''"""
 Target Component: {primary_file}
 Repository: {repo}#{issue_num}
 """
@@ -566,7 +607,7 @@ class ServiceHandler:
         return {{"status": "ok", "items": len(data)}}
 '''
 
-        test_repro = f'''"""
+            test_repro = f'''"""
 PreFlight Reproduction Test: {repo}#{issue_num}
 Failing Unit Test (RED Phase - TDD Workflow)
 Issue: {issue_title}
@@ -648,18 +689,24 @@ A production-ready `.devcontainer/devcontainer.json` is generated in the DevCont
   "remoteUser": "vscode"
 }}'''
 
-    summary = f"Analysis of {repo}#{issue_num}: Pinpointed defect in {primary_file}. Generated isolated reproduction test `test_repro.py`, editable source code, and live sandbox execution."
+    target_fn = "target_module.js" if is_js_repo else "target_module.py"
+    test_fn = "test_repro.test.js" if is_js_repo else "test_repro.py"
+    summary = f"Analysis of {repo}#{issue_num}: Pinpointed defect in {primary_file}. Generated isolated reproduction test `{test_fn}`, editable source code, and live sandbox execution."
+    diff_content = generate_unified_diff(source_code, patch_code, target_fn)
 
     return {
         "summary": summary,
         "target_files": target_files if target_files else [primary_file, "tests/test_core.py"],
-        "affected_components": [primary_file.split("/")[-1].replace(".py", ""), "Validation Engine", "Runtime Pipeline"],
-        "target_filename": "target_module.py",
+        "affected_components": [primary_file.split("/")[-1].replace(".py", "").replace(".ts", "").replace(".js", "").replace(".tsx", ""), "Validation Engine", "Runtime Pipeline"],
+        "target_filename": target_fn,
         "source_code": source_code,
         "patch_code": patch_code,
         "test_repro": test_repro,
         "preflight_md": preflight_md,
-        "devcontainer_json": devcontainer_json
+        "devcontainer_json": devcontainer_json,
+        "unified_diff": diff_content,
+        "root_cause_explanation": root_cause,
+        "remediation_explanation": remediation,
     }
 
 
@@ -769,39 +816,6 @@ async def analyze_issue(req: AnalyzeRequest):
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 
-    # 1. Instant match for curated sample issues (zero network lag, guaranteed 100% reliable)
-    for sample in SAMPLE_ISSUES:
-        if sample.url.lower().strip('/') == req.issue_url.lower().strip('/') or (sample.repo.lower() in req.issue_url.lower() and f"/{sample.issue_number}" in req.issue_url):
-            print(f"Serving curated sample issue {sample.id} instantly!")
-            fallback = generate_heuristic_fallback(sample.repo, sample.issue_number, sample.title, sample.description, [])
-            return PreflightResult(
-                repo_full_name=sample.repo,
-                issue_number=sample.issue_number,
-                issue_title=sample.title,
-                issue_body=sample.description,
-                issue_url=sample.url,
-                author="maintainer",
-                labels=[sample.tag],
-                comments_count=2,
-                summary=fallback["summary"],
-                target_files=fallback["target_files"],
-                affected_components=fallback["affected_components"],
-                target_filename=fallback["target_filename"],
-                source_code=fallback["source_code"],
-                patch_code=fallback["patch_code"],
-                test_repro=fallback["test_repro"],
-                preflight_md=fallback["preflight_md"],
-                devcontainer_json=fallback["devcontainer_json"],
-                terminal_commands=[
-                    f"git clone https://github.com/{sample.repo}.git",
-                    f"cd {sample.repo.split('/')[-1]}",
-                    "python -m venv .venv && source .venv/bin/activate",
-                    "pip install -e . && pip install pytest",
-                    "pytest -v test_repro.py  # 🔴 Verify test FAILS before patch",
-                    "pytest -v test_repro.py  # 🟢 Verify test PASSES after patch"
-                ]
-            )
-
     token = req.github_token or GITHUB_TOKEN or None
     api_key = req.gemini_api_key or DEFAULT_GEMINI_KEY or os.getenv("GOOGLE_API_KEY", "")
 
@@ -864,15 +878,27 @@ async def analyze_issue(req: AnalyzeRequest):
             ai_data["patch_code"] = fallback["patch_code"]
             ai_data["target_filename"] = fallback["target_filename"]
 
-    terminal_commands = [
-        f"git clone https://github.com/{repo}.git preflight-{repo.replace('/', '-')}",
-        f"cd preflight-{repo.replace('/', '-')}",
-        "python3 -m venv .venv && source .venv/bin/activate",
-        "pip install -e . && pip install pytest",
-        "pytest -v test_repro.py  # 🔴 Verify test FAILS before patch",
-        "# Apply code fix in target module",
-        "pytest -v test_repro.py  # 🟢 Verify test PASSES after patch"
-    ]
+    target_fn = ai_data.get("target_filename", "target_module.py")
+    is_js = any(target_fn.endswith(ext) for ext in [".js", ".mjs", ".ts", ".tsx", ".jsx"])
+    if is_js:
+        terminal_commands = [
+            f"git clone https://github.com/{repo}.git preflight-{repo.replace('/', '-')}",
+            f"cd preflight-{repo.replace('/', '-')}",
+            "npm install",
+            "node --test test_repro.test.js  # 🔴 Verify test FAILS before patch",
+            "# Apply code fix in target module",
+            "node --test test_repro.test.js  # 🟢 Verify test PASSES after patch"
+        ]
+    else:
+        terminal_commands = [
+            f"git clone https://github.com/{repo}.git preflight-{repo.replace('/', '-')}",
+            f"cd preflight-{repo.replace('/', '-')}",
+            "python3 -m venv .venv && source .venv/bin/activate",
+            "pip install -e . && pip install pytest",
+            "pytest -v test_repro.py  # 🔴 Verify test FAILS before patch",
+            "# Apply code fix in target module",
+            "pytest -v test_repro.py  # 🟢 Verify test PASSES after patch"
+        ]
 
     return PreflightResult(
         repo_full_name=repo,
@@ -892,7 +918,14 @@ async def analyze_issue(req: AnalyzeRequest):
         test_repro=ai_data.get("test_repro", "# test_repro.py"),
         preflight_md=ai_data.get("preflight_md", "# PREFLIGHT.md"),
         devcontainer_json=ai_data.get("devcontainer_json", "{}"),
-        terminal_commands=terminal_commands
+        terminal_commands=terminal_commands,
+        unified_diff=ai_data.get("unified_diff") or generate_unified_diff(
+            ai_data.get("source_code", ""),
+            ai_data.get("patch_code", ""),
+            ai_data.get("target_filename", "target_module.py")
+        ),
+        root_cause_explanation=ai_data.get("root_cause_explanation", "Input triggered an unhandled exception or failed assertion in unpatched code."),
+        remediation_explanation=ai_data.get("remediation_explanation", "Applied defensive safeguards and safe fallbacks to prevent crashes.")
     )
 
 
@@ -907,36 +940,66 @@ async def execute_sandbox(req: ExecuteRequest):
     """
     start_time = time.time()
     with tempfile.TemporaryDirectory(prefix="preflight_sandbox_") as tmpdir:
-        # Write target_module.py
-        target_path = os.path.join(tmpdir, "target_module.py")
-        with open(target_path, "w", encoding="utf-8") as f:
-            f.write(req.source_code)
-        
-        # Also write custom filename if provided
-        if req.target_filename and req.target_filename != "target_module.py":
-            alt_path = os.path.join(tmpdir, os.path.basename(req.target_filename))
-            with open(alt_path, "w", encoding="utf-8") as f:
-                f.write(req.source_code)
-
-        # Write test_repro.py
-        test_path = os.path.join(tmpdir, "test_repro.py")
-        with open(test_path, "w", encoding="utf-8") as f:
-            f.write(req.test_code)
+        target_fn = (req.target_filename or "target_module.py").strip()
+        is_js = (
+            any(target_fn.endswith(ext) for ext in [".js", ".mjs", ".cjs", ".ts", ".jsx", ".tsx"])
+            or "node:test" in req.test_code
+            or 'from "./target_module.js"' in req.test_code
+            or "from './target_module.js'" in req.test_code
+            or "export class" in req.source_code
+            or "export default" in req.source_code
+            or "module.exports" in req.source_code
+        )
 
         env = os.environ.copy()
-        env["PYTHONPATH"] = tmpdir + (
-            f"{os.pathsep}{env['PYTHONPATH']}" if "PYTHONPATH" in env else ""
-        )
+
+        if is_js:
+            # Setup ES module environment for Node.js native test runner
+            with open(os.path.join(tmpdir, "package.json"), "w", encoding="utf-8") as f:
+                json.dump({"type": "module"}, f)
+
+            # Write target module as target_module.js & target_module.mjs
+            with open(os.path.join(tmpdir, "target_module.js"), "w", encoding="utf-8") as f:
+                f.write(req.source_code)
+            with open(os.path.join(tmpdir, "target_module.mjs"), "w", encoding="utf-8") as f:
+                f.write(req.source_code)
+
+            if target_fn and target_fn not in ["target_module.js", "target_module.py"]:
+                alt_path = os.path.join(tmpdir, os.path.basename(target_fn))
+                with open(alt_path, "w", encoding="utf-8") as f:
+                    f.write(req.source_code)
+
+            # Write test file as test_repro.test.js
+            test_path = os.path.join(tmpdir, "test_repro.test.js")
+            with open(test_path, "w", encoding="utf-8") as f:
+                f.write(req.test_code)
+
+            cmd = ["node", "--test", "test_repro.test.js"]
+        else:
+            # Write target_module.py
+            target_path = os.path.join(tmpdir, "target_module.py")
+            with open(target_path, "w", encoding="utf-8") as f:
+                f.write(req.source_code)
+            
+            # Also write custom filename if provided
+            if target_fn and target_fn != "target_module.py":
+                alt_path = os.path.join(tmpdir, os.path.basename(target_fn))
+                with open(alt_path, "w", encoding="utf-8") as f:
+                    f.write(req.source_code)
+
+            # Write test_repro.py
+            test_path = os.path.join(tmpdir, "test_repro.py")
+            with open(test_path, "w", encoding="utf-8") as f:
+                f.write(req.test_code)
+
+            env["PYTHONPATH"] = tmpdir + (
+                f"{os.pathsep}{env['PYTHONPATH']}" if "PYTHONPATH" in env else ""
+            )
+            cmd = [sys.executable, "-m", "pytest", "-v", "--no-header", "--tb=short", "test_repro.py"]
 
         try:
             proc = await asyncio.create_subprocess_exec(
-                sys.executable,
-                "-m",
-                "pytest",
-                "-v",
-                "--no-header",
-                "--tb=short",
-                "test_repro.py",
+                *cmd,
                 cwd=tmpdir,
                 env=env,
                 stdout=asyncio.subprocess.PIPE,
