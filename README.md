@@ -62,6 +62,15 @@ source .venv/bin/activate
 pip install -r requirements.txt
 python3 -m uvicorn main:app --host 127.0.0.1 --port 8001 --reload
 ```
+
+On Windows PowerShell, use:
+```powershell
+Set-Location backend
+py -m venv .venv
+.\.venv\Scripts\Activate.ps1
+py -m pip install -r requirements.txt
+py -m uvicorn main:app --host 127.0.0.1 --port 8001 --reload
+```
 API Documentation will be available at: `http://127.0.0.1:8001/docs`
 
 ### 2. Start Frontend Server
@@ -78,3 +87,27 @@ Access the dashboard at: `http://127.0.0.1:5174`
 - **1-Click Curated Demos:** Instant analysis for `psf/requests #5491`, `pallets/flask #4523`, `encode/httpx #1230`, and `fastapi/fastapi #3112`.
 - **Zero-Friction Fallback:** Resilient synthesis engine ensures seamless hackathon demos even if external API limits are encountered.
 - **Tabbed Code Viewer:** Switch between `test_repro.py`, `PREFLIGHT.md`, `devcontainer.json`, and terminal commands with 1-click copy and file download.
+
+---
+
+## 🖥️ Screenshots
+
+### PreFlight Sandbox
+
+<p align="center">
+    <img src="./Screenshot%202026-10-18%20182119.png" alt="PreFlight Sandbox landing screen" width="100%" />
+</p>
+
+### Live Sandbox and Target Analysis
+
+<p align="center">
+    <img src="./Screenshot%202026-10-18%20184109.png" alt="Target analysis and editable source code" width="49%" />
+    <img src="./Screenshot%202026-10-18%20184134.png" alt="Failing reproduction test in the live sandbox" width="49%" />
+</p>
+
+### Generated Developer Workflows
+
+<p align="center">
+    <img src="./Screenshot%202026-10-18%20184150.png" alt="Generated DevContainer configuration" width="49%" />
+    <img src="./Screenshot%202026-10-18%20184210.png" alt="Generated CLI workflow" width="49%" />
+</p>

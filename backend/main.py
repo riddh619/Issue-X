@@ -924,7 +924,9 @@ async def execute_sandbox(req: ExecuteRequest):
             f.write(req.test_code)
 
         env = os.environ.copy()
-        env["PYTHONPATH"] = tmpdir + (f":{env['PYTHONPATH']}" if "PYTHONPATH" in env else "")
+        env["PYTHONPATH"] = tmpdir + (
+            f"{os.pathsep}{env['PYTHONPATH']}" if "PYTHONPATH" in env else ""
+        )
 
         try:
             proc = await asyncio.create_subprocess_exec(
