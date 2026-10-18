@@ -291,4 +291,44 @@ Open the application in your browser:
 
 `http://127.0.0.1:5174`
 
-The Vite development configuration provides the
+The Vite development configuration provides the frontend's backend proxy. Keep both development servers running while using the application.
+
+## Generated Artifacts
+
+| Artifact | Purpose |
+|---|---|
+| `test_repro.py` | Proposed test for reproducing the reported failure |
+| `PREFLIGHT.md` | Technical briefing, architectural context, investigation guidance, and data-flow diagrams |
+| `.devcontainer/devcontainer.json` | Development container configuration |
+| Terminal commands | Instructions for repository setup and the reproduction workflow |
+
+These artifacts are intended to accelerate investigation. Generated tests, architectural interpretations, and root-cause hypotheses should be reviewed and verified before being relied upon.
+
+## Demo Scenarios
+
+The project includes curated examples associated with the following repositories and issues:
+
+- [psf/requests — Issue #5491](https://github.com/psf/requests/issues/5491)
+- [pallets/flask — Issue #4523](https://github.com/pallets/flask/issues/4523)
+- [encode/httpx — Issue #1230](https://github.com/encode/httpx/issues/1230)
+- [fastapi/fastapi — Issue #3112](https://github.com/fastapi/fastapi/issues/3112)
+
+These examples can be used to explore the application's workflow and generated outputs. Availability and output quality depend on the configured services and the implementation of each demonstration scenario.
+
+## Future Improvements
+
+Potential areas for further development include:
+
+- More precise mapping between issue descriptions and relevant code locations.
+- Automated validation of generated reproduction tests.
+- Support for additional programming languages and testing frameworks.
+- Improved handling of complex dependency configurations.
+- More robust verification of generated development container settings.
+- Integration with GitHub pull requests and contribution workflows.
+- Better observability for failed API requests and incomplete analyses.
+
+## Project Objective
+
+PreFlight Sandbox aims to reduce the initial effort required to contribute to open-source software by turning an unfamiliar GitHub issue into a structured, actionable debugging starting point.
+
+By combining repository context, AI-assisted analysis, test generation, and environment preparation, the project helps developers move from issue discovery toward reproducible investigation with greater clarity.
