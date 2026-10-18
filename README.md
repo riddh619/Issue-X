@@ -341,14 +341,15 @@ By combining repository context, AI-assisted analysis, test generation, and envi
     <img src="./Screenshot%202026-10-18%20182119.png" alt="PreFlight Sandbox landing screen" width="100%" />
 </p>
 
-### Live Sandbox and Target Analysis
+### Live Sandbox and Target Analysis :
 
 <p align="center">
     <img src="./Screenshot%202026-10-18%20184109.png" alt="Target analysis and editable source code" width="49%" />
     <img src="./Screenshot%202026-10-18%20184134.png" alt="Failing reproduction test in the live sandbox" width="49%" />
 </p>
 
-### Generated Developer Workflows
+
+### Generated Developer Workflows :
 
 <p align="center">
     <img src="./Screenshot%202026-10-18%20184150.png" alt="Generated DevContainer configuration" width="49%" />
